@@ -52,13 +52,27 @@ You'll need:
 - Node ≥ 20 (use `mise` or `nvm`; we run on 25 in CI but 20 LTS is the floor)
 - pnpm 10+
 - A Supabase project (free tier, PostGIS + pgcrypto enabled)
+- [sqlfluff](https://sqlfluff.com/) for the migration pre-commit hook: `brew install sqlfluff` (or `pip install 'sqlfluff>=4,<5'`). The hook degrades gracefully if sqlfluff isn't installed — CI will still validate migrations on PR — but you'll lose the immediate paste/save-error gate locally.
 
 ```bash
-pnpm install
+pnpm install                         # also installs Husky pre-commit
 cp .env.example .env.local           # then fill the empty values
 pnpm drizzle-kit introspect          # smoke test: connects to your DB
 pnpm dev                             # http://localhost:3000
 ```
+
+### Authoring migrations
+
+Migrations live under `supabase/migrations/NNNN_<name>.sql`, numbered in dependency order, applied via the Supabase CLI (`supabase db push`) or the Supabase MCP `apply_migration`. Migration history is **append-only** — never edit a committed migration; always add a new one.
+
+Every migration must:
+- Be idempotent (`CREATE … IF NOT EXISTS`, `DROP TRIGGER IF EXISTS` + `CREATE`, `CREATE OR REPLACE FUNCTION`, `INSERT … ON CONFLICT … DO NOTHING`).
+- Apply clean against a fresh empty database (CI proves this on every PR).
+- Apply clean a second time without errors or extra rows (CI also asserts this).
+- Target the `live` / `staging` / `archive` schemas, never `public` (PostGIS-reserved).
+- Carry a header comment documenting why it's hand-rolled SQL vs Drizzle-Kit-generated.
+
+The pre-commit hook runs `sqlfluff lint` on staged migration files; CI re-lints and then applies every migration in order against a Postgres + PostGIS container.
 
 The IRVE CSV cache lives under `.cache/` (gitignored). For the full pipeline locally, see [`docs/03-implementation-plan.md` §3](docs/03-implementation-plan.md) for the W2+ task instructions.
 

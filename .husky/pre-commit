@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Pre-commit hook — Prix-Bornes
+#
+# Runs sqlfluff against staged files under supabase/migrations/*.sql.
+# Local install: `brew install sqlfluff` (see CONTRIBUTING.md).
+# Authoritative migration apply test runs in GitHub Actions CI; this hook
+# is a fast paste/save-error gate, not a substitute for CI.
+#
+# Graceful degradation: if sqlfluff is not installed, warn and skip
+# (don't block the commit). CI will catch real issues regardless.
+
+set -euo pipefail
+
+# Find staged .sql files under supabase/migrations/. Newline-delimited.
+STAGED_MIGRATIONS=$(git diff --cached --name-only --diff-filter=ACMR \
+  | grep -E '^supabase/migrations/.*\.sql$' || true)
+
+if [ -z "$STAGED_MIGRATIONS" ]; then
+  exit 0
+fi
+
+if ! command -v sqlfluff >/dev/null 2>&1; then
+  echo "⚠  sqlfluff not installed — skipping migration lint."
+  echo "   Install with: brew install sqlfluff (see CONTRIBUTING.md)"
+  echo "   CI will still validate migrations on push."
+  exit 0
+fi
+
+echo "→ sqlfluff lint on staged migrations:"
+echo "$STAGED_MIGRATIONS" | sed 's/^/    /'
+
+# xargs to pass each file individually (sqlfluff accepts multiple paths
+# but per-file output is easier to read on failure).
+echo "$STAGED_MIGRATIONS" | xargs sqlfluff lint

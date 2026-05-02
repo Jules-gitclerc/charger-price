@@ -1,0 +1,36 @@
+# sqlfluff config — Prix-Bornes
+#
+# Purpose: catch real SQL bugs (parser errors, structural issues, ambiguous
+# references) in migrations before they hit Postgres. NOT a style enforcer
+# — the existing migrations 0001/0002/0003 use aligned column types and
+# right-justified type tokens for readability, and we will not reformat
+# them. Per T04 brief: "use rule exclusions to allowlist current style.
+# Append-only migration history still binds."
+#
+# Local install: `brew install sqlfluff` (see CONTRIBUTING.md).
+# Runs: pre-commit (Husky) on staged supabase/migrations/*.sql.
+# Authoritative gate: GitHub Actions CI (.github/workflows/migrations.yml)
+# applies migrations against a real Postgres + PostGIS container.
+
+[sqlfluff]
+dialect = postgres
+# Only the rule families that catch real bugs. Layout/style rules are
+# excluded because they would fight the aligned-types style of 0001-0003.
+# Parser errors (PRS) and templater errors (TMP) are always on regardless.
+rules = core
+exclude_rules = layout.indent, layout.spacing, layout.long_lines, layout.commas, layout.cte_newline, layout.select_targets, layout.set_operators, capitalisation.keywords, capitalisation.identifiers, capitalisation.functions, capitalisation.literals, capitalisation.types, references.consistent, references.qualification, structure.column_order, structure.unused_cte, ambiguous.column_count, convention.terminator, convention.not_equal, convention.coalesce, convention.select_trailing_comma, convention.is_null
+
+# Templater = raw: migrations are plain SQL, no Jinja / dbt templating.
+templater = raw
+
+# Encoding: UTF-8 — French descriptions and unicode dashes appear in seed rows.
+encoding = utf-8
+
+# Lines can be long; we use them for aligned column declarations and
+# multi-clause CHECK constraints. layout.long_lines is already excluded.
+max_line_length = 200
+
+[sqlfluff:indentation]
+# Keep this minimal — the rules are excluded above anyway.
+indent_unit = space
+tab_space_size = 2
