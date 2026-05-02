@@ -1,0 +1,27 @@
+-- Negative-test fixture for the pre-commit gate hypothesis probe.
+--
+-- This file is DELIBERATELY MALFORMED. It contains an orphan IF/THEN/END IF
+-- block outside any DO $$ … END $$ wrapper — exactly the class of error
+-- that twice surfaced as a false positive in T04 chat-render but is the
+-- real-world failure mode the gate must catch.
+--
+-- The .bad extension keeps it out of the CI migration apply glob
+-- (.github/workflows/migrations.yml uses `[0-9][0-9][0-9][0-9]_*.sql`,
+-- which won't match this filename). The .lint-fixtures/ directory is
+-- a deliberate naming convention, not a sqlfluff include path.
+--
+-- Probe protocol (per T04 closing issue #1):
+--   $ sqlfluff lint supabase/migrations/.lint-fixtures/orphan-if-outside-do.sql.bad
+--   - exit 0 / "All Finished!" → sqlfluff has a blind spot, libpg_query
+--                                gate needed in pre-commit
+--   - non-zero / parser error  → sqlfluff catches it, gate intact
+
+IF NOT EXISTS (
+  SELECT 1 FROM pg_constraint
+   WHERE conname = 'foo_fkey'
+     AND connamespace = 'live'::regnamespace
+) THEN
+  ALTER TABLE live.foo
+    ADD CONSTRAINT foo_fkey
+    FOREIGN KEY (bar_id) REFERENCES live.bar(id);
+END IF;
