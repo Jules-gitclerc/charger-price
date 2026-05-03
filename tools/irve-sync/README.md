@@ -1,9 +1,12 @@
-# `tools/irve-sync` — IRVE consolidated-CSV ingestion runner (T06a)
+# `tools/irve-sync` — IRVE consolidated-CSV ingestion runner (T06a → T06b)
 
 The Python entrypoint that downloads the IRVE consolidated CSV from
-data.gouv.fr and lands it in `staging.irve_raw`. T06b's swap function
-(migration 0012, not yet shipped) will diff staging against `live` in a
-later step.
+data.gouv.fr, lands it in `staging.irve_raw`, then calls
+`live.run_irve_swap()` to upsert into `live.stations` /
+`live.charge_points`. The SQL function closes the run row internally on
+the success / partial path; on swap failure the runner issues a separate
+`live.close_ingestion_run(..., 'failed', …)` per the E15 post-rollback
+contract.
 
 ## Modes
 
@@ -24,7 +27,10 @@ the header validator or per-row pre-processor.
 
 Downloads the CSV, SHA-aborts if the upstream blob is unchanged, opens a
 `live.ingestion_runs` row in `status='running'`, TRUNCATEs
-`staging.irve_raw`, and pipes a transformed stream through `psql \copy`.
+`staging.irve_raw`, pipes a transformed stream through `psql \copy`,
+calls `live.run_irve_swap()` to upsert into live (the SQL closes the
+run row internally to `'success'` or `'partial'`), and advances the SHA
+cache in `staging.ingestion_run_meta`.
 
 ```bash
 export SUPABASE_DB_URL='postgresql://…'   # direct, NOT pooler
@@ -32,9 +38,52 @@ export GIT_SHA="$(git rev-parse HEAD)"
 python3 tools/irve-sync/main.py
 ```
 
-T06a leaves the run row in `status='running'` on the COPY-load path —
-T06b will close it. The SHA-abort path inserts a fully-closed
-`status='success'` row in one shot.
+The SHA-abort path inserts a fully-closed `status='success'` row in one
+shot. On swap failure, the runner issues a separate
+`close_ingestion_run(..., 'failed', error_message)` after the swap txn
+rolls back, then exits 1. The SHA cache is only advanced after a
+successful swap+close — a failed run leaves the cache untouched so the
+next workflow run retries naturally.
+
+### `--force-refresh`
+
+Operator-only escape hatch. Clears
+`staging.ingestion_run_meta` for the IRVE slug **before** the SHA
+check, so the runner always proceeds to swap even when the upstream
+blob is unchanged.
+
+```bash
+python3 tools/irve-sync/main.py --force-refresh
+```
+
+Used to re-test the pipeline against staging that's already
+up-to-date — for example, after a SQL function change that needs a
+real-data smoke against the existing 211k-row staging without waiting
+for upstream to publish a new CSV.
+
+**Combination with `DRY_RUN=true` is a no-op for the cache clear.** The
+dry-run early-exit branch fires before the force-refresh DELETE — by
+design, since (force-refresh + dry-run) is a contradictory request
+(operator says "wipe cache so I re-process" and also "don't actually
+process anything"). Operators wanting "clear then telemetry" should run
+two invocations:
+
+```bash
+# Step 1: clear cache + actually process (advances cache to new SHA)
+python3 tools/irve-sync/main.py --force-refresh
+
+# Step 2: telemetry-only invocation against the just-advanced cache
+DRY_RUN=true python3 tools/irve-sync/main.py
+```
+
+## Mode matrix
+
+| `--force-refresh` | `DRY_RUN` env | Behavior |
+|:---:|:---:|---|
+| `F` | `F` | **Vanilla.** orphan sweep → download → SHA-check vs cache; if match → short-lived `success` row + return; if mismatch → open `running` row → TRUNCATE+COPY → swap → SQL closes row → meta upsert + log. Swap failure → separate `close('failed')` + exit 1. |
+| `T` | `F` | **Force-refresh.** orphan sweep → download → DELETE meta cache → SHA-check (always passes, cache empty) → open row → TRUNCATE+COPY → swap → SQL closes row → meta upsert (re-populates cache). |
+| `F` | `T` | **Dry-run.** orphan sweep → download → short-lived `success` row with telemetry message → return. No staging write, no SHA check, no swap, no meta touch. |
+| `T` | `T` | **Contradictory.** dry-run early-exits before the force-refresh DELETE — cache is **NOT** cleared. See two-step workaround above. |
 
 ## Local setup
 
@@ -45,6 +94,21 @@ pip install -r tools/irve-sync/requirements.txt
 
 Python 3.11+ required (CI pins via `actions/setup-python@v5`).
 
+Postgres client (`psql`) required for full-run mode — the runner
+shellouts to `psql` for every DB call (the COPY path uses `\copy`,
+which is psql-side, not libpq-side, so a Python-only `psycopg2`
+substitute won't cover it).
+
+```bash
+# macOS
+brew install libpq && brew link --force libpq
+
+# Debian / Ubuntu
+sudo apt-get install -y postgresql-client
+```
+
+Verify with `psql --version` (≥ 14 recommended; CI runners ship 16).
+
 ## Env vars
 
 | Var | Mode | Notes |
@@ -52,6 +116,7 @@ Python 3.11+ required (CI pins via `actions/setup-python@v5`).
 | `SUPABASE_DB_URL` | full run | Direct Postgres URI (transaction pooler **rejected** because COPY needs a real session). Never logged. |
 | `GIT_SHA` | full run | Stamped on every `live.ingestion_runs.git_sha`. Required — the runner fails loud if absent. The workflow wires `${{ github.sha }}` here. |
 | `IRVE_RESOURCE_ID` | full run | Optional override for the data.gouv.fr resource UUID. Defaults to the pin in `main.py` (`DEFAULT_RESOURCE_ID`). |
+| `DRY_RUN` | full run | `true`/`1`/`yes` → telemetry-only invocation; download but skip TRUNCATE/COPY/swap/meta. Writes a short-lived `success` row and exits 0. See mode matrix above. |
 
 ## Fixture file (`test/fixture-10rows.csv`)
 
@@ -83,6 +148,7 @@ near the relevant code path.
 
 - Tariff parsing — that's T09–T13.
 - Reverse geocoding — that's T07.
-- Diff `staging` against `live` — that's T06b's `live.run_irve_swap()`.
+- Operator alias resolution — that's T08 (the swap deliberately leaves
+  `live.stations.operator_id` / `network_id` untouched).
 - Write to `live.station_tariffs`, `live.parser_outcomes`, or any tariff
   table — see T06 brief hard rules #7 and #8.

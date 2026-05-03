@@ -25,6 +25,14 @@ Env vars (full run only):
   missing.
 * ``IRVE_RESOURCE_ID``  data.gouv.fr resource UUID. Defaults to the pin
   in ``DEFAULT_RESOURCE_ID`` below.
+* ``DRY_RUN``  ``true``/``1``/``yes`` → telemetry-only invocation;
+  download but skip TRUNCATE/COPY/swap/meta. Writes a short-lived
+  ``success`` row and exits 0.
+
+Operator-only CLI flag (full run only): ``--force-refresh`` clears
+``staging.ingestion_run_meta`` for the IRVE slug before the SHA check,
+forcing the runner to re-process. See ``full_run()``'s mode matrix for
+interaction with ``DRY_RUN``.
 
 The runner never logs ``SUPABASE_DB_URL``; subprocess errors strip it.
 """
@@ -524,7 +532,7 @@ def _upsert_meta(env: dict[str, str], sha: str) -> None:
     _psql(sql, env=env)
 
 
-def full_run() -> int:
+def full_run(force_refresh: bool = False) -> int:
     """Download → SHA-abort or stage → swap into live → terminal status.
 
     On the load path: open ingestion_runs row at status='running',
@@ -541,6 +549,21 @@ def full_run() -> int:
     `staging.ingestion_run_meta` is only advanced after a successful
     swap+close, so a failed run leaves the SHA cache untouched and the
     next workflow run retries naturally without --force-refresh.
+
+    Mode matrix (force_refresh, DRY_RUN env):
+
+    * (F, F) — vanilla. SHA-abort if cache matches; else swap+close.
+    * (T, F) — force-refresh. DELETE staging.ingestion_run_meta cache
+              before SHA check, so the run always proceeds to swap.
+              Used to re-test the pipeline against staging that's
+              already up-to-date.
+    * (F, T) — dry-run. orphan sweep + download + telemetry-only
+              `success` row. No staging write, no SHA check, no swap.
+    * (T, T) — contradictory. dry-run early-exits before the
+              force-refresh DELETE, so the cache is **NOT** cleared.
+              Operators wanting "clear then telemetry" should run two
+              invocations: --force-refresh once non-dry to clear+
+              process, then DRY_RUN once non-force-refresh.
     """
     env = {k: v for k, v in os.environ.items() if v is not None}
     git_sha = _read_required_env("GIT_SHA")
@@ -578,6 +601,17 @@ def full_run() -> int:
             f"ingestion_runs.id={run_id}, status=success"
         )
         return 0
+
+    if force_refresh:
+        print(
+            f"# --force-refresh: clearing SHA cache for slug "
+            f"{SOURCE_SLUG}"
+        )
+        _psql(
+            "DELETE FROM staging.ingestion_run_meta WHERE slug = "
+            + _quote_sql_literal(SOURCE_SLUG),
+            env=env,
+        )
 
     previous_sha = _last_sha(env)
     if previous_sha == sha:
@@ -700,7 +734,7 @@ def full_run() -> int:
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "T06a IRVE consolidated-CSV runner. "
+            "T06a/T06b IRVE consolidated-CSV runner. "
             "Use --validate-fixture-only for offline CI smoke."
         ),
     )
@@ -711,11 +745,22 @@ def main(argv: Iterable[str] | None = None) -> int:
              "checked-in fixture. NO network, NO DB. Exit non-zero on "
              "logic regressions.",
     )
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help="Clear staging.ingestion_run_meta for the IRVE slug before "
+             "the SHA check, forcing the runner to re-process even when "
+             "the upstream blob is unchanged. Operator-only escape hatch "
+             "for re-testing the pipeline against already-current "
+             "staging. No-op when combined with DRY_RUN env var (dry-run "
+             "early-exits before the cache DELETE — see full_run() "
+             "docstring's mode matrix).",
+    )
     args = parser.parse_args(argv)
 
     if args.validate_fixture_only:
         return validate_fixture()
-    return full_run()
+    return full_run(force_refresh=args.force_refresh)
 
 
 if __name__ == "__main__":
