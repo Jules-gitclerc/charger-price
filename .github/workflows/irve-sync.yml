@@ -1,0 +1,86 @@
+name: irve-sync
+
+# T06a — daily IRVE consolidated-CSV ingestion runner.
+#
+# Downloads the CSV from data.gouv.fr (pinned resource id, see env below),
+# SHA-aborts on no-change, opens a live.ingestion_runs row, TRUNCATEs
+# staging.irve_raw, and pipes a transformed stream through psql \copy.
+# T06b's swap function (migration 0012, future) closes the run row.
+#
+# SECURITY NOTE: this workflow does NOT use any github.event.* untrusted
+# inputs in run: blocks. The only untrusted-ish env we use is
+# `inputs.dry_run` from workflow_dispatch, which is a typed boolean and
+# cannot inject shell. SUPABASE_DB_URL is a repo secret and is never
+# logged by tools/irve-sync/main.py (subprocess errors strip it).
+#
+# Concurrency rule per T06a brief design call C4: schedule invocations
+# cancel a stuck predecessor (the next cron always wins); workflow_dispatch
+# invocations queue (manual = intentional, no surprise kills).
+
+on:
+  schedule:
+    # 01:00 UTC daily = 02:00 CET (winter) / 03:00 CEST (summer). After
+    # the data.gouv.fr Paris-time daily refresh window.
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Telemetry-only (download + hash + orphan sweep). Skips TRUNCATE / COPY / meta upsert. Inserts a closed status=success row in live.ingestion_runs with error_message=dry_run.'
+        type: boolean
+        default: false
+        required: false
+
+concurrency:
+  group: irve-sync
+  cancel-in-progress: ${{ github.event_name == 'schedule' }}
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: download → SHA → COPY → open ingestion_runs row
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      # Public — pinned data.gouv.fr resource id. Override per-run via
+      # workflow_dispatch by editing the workflow file (we deliberately
+      # don't expose this as an input; resource pin churn must be
+      # version-controlled).
+      IRVE_RESOURCE_ID: eb76d20a-8501-400e-b336-d85724de5435
+      DRY_RUN: ${{ inputs.dry_run }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install psql client (postgres 15)
+        # Match the prod Supabase major and the migrations CI image.
+        # postgresql-client-15 is what `apt-get install postgresql-client`
+        # resolves to on ubuntu-24.04 runners as of 2026-05.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Install Python deps
+        run: pip install -r tools/irve-sync/requirements.txt
+
+      - name: Run irve-sync (dry-run telemetry only)
+        if: ${{ inputs.dry_run == true }}
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          GIT_SHA: ${{ github.sha }}
+        # The runner reads DRY_RUN from env; logic is in main.py.
+        run: python3 tools/irve-sync/main.py
+
+      - name: Run irve-sync (real)
+        if: ${{ inputs.dry_run != true }}
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          GIT_SHA: ${{ github.sha }}
+        run: python3 tools/irve-sync/main.py

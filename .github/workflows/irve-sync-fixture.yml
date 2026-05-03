@@ -1,0 +1,39 @@
+name: irve-sync-fixture
+
+# Offline pre-processor smoke for the T06a runner. Runs
+# `python tools/irve-sync/main.py --validate-fixture-only` against the
+# checked-in fixture on every PR that touches the runner. NO DB. NO
+# network. NO secrets needed.
+#
+# SECURITY NOTE: no github.event.* untrusted inputs are used in run:
+# blocks. The fixture mode reads only the in-repo fixture file and exits
+# non-zero on logic regressions in the header validator or per-row
+# pre-processor.
+
+on:
+  pull_request:
+    paths:
+      - 'tools/irve-sync/**'
+      - '.github/workflows/irve-sync-fixture.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  fixture:
+    name: validate-fixture-only
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python deps
+        run: pip install -r tools/irve-sync/requirements.txt
+
+      - name: Validate fixture (no DB, no network)
+        run: python3 tools/irve-sync/main.py --validate-fixture-only

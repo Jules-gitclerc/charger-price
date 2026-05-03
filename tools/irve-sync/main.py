@@ -449,8 +449,12 @@ def full_run() -> int:
     _read_required_env("SUPABASE_DB_URL")
     resource_id = os.environ.get("IRVE_RESOURCE_ID") or DEFAULT_RESOURCE_ID
     url = DATA_GOUV_RESOURCE_URL.format(resource_id=resource_id)
+    dry_run = os.environ.get("DRY_RUN", "").lower() in ("true", "1", "yes")
 
-    print(f"# IRVE sync starting (resource={resource_id}, git_sha={git_sha[:12]}…)")
+    print(
+        f"# IRVE sync starting (resource={resource_id}, "
+        f"git_sha={git_sha[:12]}…, dry_run={dry_run})"
+    )
 
     swept = _orphan_sweep(env)
     if swept:
@@ -463,6 +467,19 @@ def full_run() -> int:
         f"# download: {len(csv_bytes) / (1024 * 1024):.1f} MiB, "
         f"sha={sha[:12]}…, took {t_download:.1f}s"
     )
+
+    if dry_run:
+        run_id = _short_lived_success_row(
+            env, git_sha,
+            f"dry_run: telemetry-only invocation; downloaded "
+            f"{len(csv_bytes) / (1024 * 1024):.1f} MiB, sha={sha[:12]}…; "
+            f"no staging write",
+        )
+        print(
+            f"# DRY-RUN: skipped TRUNCATE/COPY/meta-upsert; "
+            f"ingestion_runs.id={run_id}, status=success"
+        )
+        return 0
 
     previous_sha = _last_sha(env)
     if previous_sha == sha:
