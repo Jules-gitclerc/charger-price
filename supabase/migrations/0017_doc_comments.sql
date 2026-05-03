@@ -1,0 +1,31 @@
+-- Migration 0017 — Documentation-only COMMENT updates (W4 closing bundle)
+--
+-- T07 + T08 surfaced semantic nuances on existing columns that warrant
+-- inline catalog docs. This migration is documentation-only — no DDL,
+-- no DML, no schema change. Pure COMMENT updates.
+--
+-- WHY HAND-ROLLED SQL: COMMENT statements are intrinsically raw SQL.
+-- Drizzle has no DSL for them. Doc-only migrations are an established
+-- pattern (cf. 0007's COMMENT-heavy passages); 0017 keeps it minimal.
+--
+-- IDEMPOTENCY: COMMENT ON ... IS '...' is replace-on-conflict by
+-- definition (a column has at most one comment; re-running the
+-- statement overwrites with the same text). Re-applying 0017 is a
+-- no-op against the catalog state.
+--
+-- SCOPE: live.geocode_cache.confidence_score only. Future doc-only
+-- COMMENT updates should accumulate in successive 00NN_doc_comments.sql
+-- migrations rather than amending this one (append-only convention).
+--
+-- WHY NOW (W4 closing): The original 0008 COMMENT (verbatim: "BAN-supplied
+-- score in [0, 1]. Application uses it to decide whether to trust the
+-- geocode or request human review.") is incorrect for BAN-reverse rows.
+-- T07.3 documented in tools/geocode/main.py that BAN's /reverse/csv/
+-- endpoint does NOT return result_score; it returns result_distance in
+-- meters, and T07's _score_from_reverse_result synthesizes a
+-- distance-banded confidence_score. The catalog COMMENT was a misleading
+---but-not-load-bearing claim that should be corrected before M1 close
+-- so future contributors don't infer the wrong semantic from \d+ output.
+
+COMMENT ON COLUMN live.geocode_cache.confidence_score IS
+  'Confidence in [0, 1]. Semantic differs by provider: BAN forward (/search/csv/) returns native result_score in [0,1]. BAN reverse (/reverse/csv/) returns result_distance in meters; T07 synthesizes confidence via tools/geocode/main.py:_score_from_reverse_result with the banding distance<=100m -> 0.95, <=1000m -> 0.70, <=10000m -> 0.30, >10000m -> 0.10. Future providers MUST document their score semantic in tools/<runner>/main.py and reference here. Apply gate threshold for live.stations writes is 0.5 (T07.1 design call d).';

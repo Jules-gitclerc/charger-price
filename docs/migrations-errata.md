@@ -207,3 +207,79 @@ Hard rule #4 atomicity held throughout: zero pollution to `live.stations` / `liv
 2. Include the surfacing session, the precise issue, action taken (usually "none"), and the forward practice for new migrations.
 3. Commit with `docs: migrations-errata add E<n>` (or batch as `docs: migrations-errata staging <session> findings`).
 4. Append-only — never edit existing entries except for typo fixes.
+
+---
+
+## E22 — IRVE PDC-grain cardinality doesn't predict station-grain at API normalization grain (Phase 1 audit blind-spot, 5th instance)
+
+- **Surfaced:** T07.1 (BAN reverse-geocode acceptance bar derivation); compounded at T08.0 (operator-resolver forecast).
+- **What's wrong:** Phase 1 §A.1 sampled IRVE at PDC grain (224,467 rows). T06b's swap dedupes to 52,806 stations via `DISTINCT ON (id_station_itinerance)` per E20. T07.1's acceptance bar derived "expect ≥21,097 successful geocodes" using a heuristic anchored on PDC-grain ratios; the actual station-grain work-set was 21,737 stations needing geocoding (~1.39 dedupe factor between PDC-grain and station-grain). T08.0's forecast (28,789) similarly drifted from measured (29,446) when the per-enseigne distribution underlying the forecast came from a Phase-1 PDC-grain snapshot but the resolver operates at station-grain post-dedupe. Per-operator divergences are stark: Power Dot 13,896 → 1,142, Freshmile 9,274 → 3,110, etc.
+- **Action taken:** None on the migrations or runner. T07.3 closing summary documented the divergence as a forecast-vs-measured discrepancy rather than a defect; T08.1 locked the acceptance bar against the measured value (29,446) rather than the Phase-1-derived forecast.
+- **Forward practice (T07-era):** Acceptance bars derived from Phase 1 distribution numbers MUST be re-grounded against current live state via `SELECT` before being treated as load-bearing. Any number citing "expect N rows" should also state the grain at which N was measured (PDC-grain, station-grain, post-dedupe-at-target, etc.).
+- **Application notes (W4):** Plan filename drift continues — `docs/03-implementation-plan.md §T08` referenced `0012_operator_aliases.sql`; actual landed at `0016_operator_aliases.sql` (E14 numbering pattern; the chain had advanced to 0015 by W4 start). Forward-practice expansion: when describing a seed migration's row count, count VALUES rows programmatically before pasting any "N operators / N aliases" claim. T08.0 design summary said "33 operators" while the actual seed had 34 — eyeball-counting fails on lists of this size. Concrete recipe: `awk` or `grep -c` against the VALUES block of the staged migration immediately before drafting any prose count.
+
+## E23 — IRVE long-tail enseigne pattern: 23,360 stations (44.2%) lack a curated alias mapping; 91% of the gap is heterogeneous miscellaneous, not prefix-pattern operators (Phase 1 audit blind-spot, 6th instance)
+
+- **Surfaced:** T08.2 closing (long-tail audit query post-resolve).
+- **What's wrong:** T08's curated seed covers 29,446 of 52,806 stations (55.8%). The 23,360-station NULL bucket decomposes as: 1,658 Allego site-suffix variants (`'allego - <site>'`), 249 Réseau-de-recharge variants (~70 small public-tender CPOs each <30 stations), 60 Fastned site-suffix (`'fastned <site>'`), 52 TotalEnergies site-suffix (`'totalenergies - <site>'`), and **21,341 miscellaneous (91% of the gap)**. Phase 1 §A.1's distribution implied prefix-pattern operators would dominate the long tail; reality is genuinely heterogeneous low-volume operators (likely individual public-tender CPOs and private installations).
+- **Action taken:** None on the migrations or runner. T08's hard rules accepted the long-tail NULL state by design (T08.0 Q4). Concrete numbers locked into closing summary for M1.5 prioritization input.
+- **Forward practice:** M1.5+ prefix-rule alias type (`confidence='prefix'` with LIKE-based matching) recovers at most ~2,019 stations (Allego + TotalEnergies + Fastned prefixes — 91% of those identifiable patterns sit in just the Allego prefix family, 1,658 / 1,770). The remaining ~21,341 requires either broader curated seed, programmatic operator extraction from `nom_amenageur` / `id_station_itinerance` prefixes, or accepting a permanent ~40% NULL operator floor for M1. **Decide M1.5 prioritization based on these concrete volumes**, not the Phase-1 estimate that overweighted prefix patterns. Reframes E23 from "M1.5 prefix-rule recovers most of the gap" to "M1.5 prefix-rule recovers ~9% of the NULL bucket; the remaining 91% needs a different strategy entirely."
+
+---
+
+## Closing meta-note (W4 close — Phase 1 audit blind-spot pattern refresh)
+
+Supersedes the T06b.1 → T06b.3 closing meta-note in scope, but the original entry stays as historical record per append-only convention.
+
+Phase-1 A.1 audit method missed **six classes of issue across W3+W4**:
+
+1. **Within-key duplicates** (E17) — sampling distinct values without measuring per-key cardinality.
+2. **Prefix-distribution gaps** (E18) — postal-code-only geographic scoping without checking national-ID prefix distribution.
+3. **Type-precision round-tripping** (E19) — checking validity against raw text without casting through the destination column's precision.
+4. **Cross-dimension uniqueness** (E20) — assuming external PKs are globally unique without measuring `(id || parent)` cardinality vs `id`-alone cardinality.
+5. **Cardinality at API-normalization grain** (E22) — PDC-grain Phase-1 numbers don't predict post-dedupe station-grain reality at API call sites or alias resolvers (1.39× factor in practice).
+6. **Long-tail composition** (E23) — distribution-by-top-N skews the operator's mental model; the long tail's *internal* composition (prefix-pattern vs heterogeneous miscellaneous) matters as much as its size, and Phase 1 didn't measure it.
+
+**Pattern (refreshed v2):** distinct-value sampling without per-key cardinality + cross-dimension cardinality + destination-type round-trip checks + post-transformation grain re-grounding + long-tail composition analysis. Future ingestion-prep audits should run all five checks as standard. Bundle these as the **"Phase 1 audit checklist v2"** if M2 introduces a new dataset or M1.5 expands the alias seed.
+
+### Hard rule #4 cumulative tally (W3+W4 close)
+
+Hard rule #4 atomicity has now caught **8+ issues across W3+W4**:
+
+- T06b.1 — 4 first-apply bugs in 0012, 0013, 0014, 0015 (E17, E19, E20, idempotence verification respectively).
+- T06b.3.a — 1 environmental fault (cluster-level read-only flip mid-swap, E21).
+- T07.3 — 2 runner bugs (chunked-commit dedupe error + skip-caching infinite-loop).
+- T08.1 — 1 self-count drift caught pre-commit by COMMENT review (33 vs 34 operators).
+- T08.2 — surfaced forecast-vs-measured drift (28,789 vs 29,446) which the locked-bar pattern absorbed without runtime impact.
+
+The contract is load-bearing infrastructure for this codebase's correctness story. Strict gating prevented real data damage at every catch site.
+
+---
+
+## Discipline observations (W4 additions)
+
+### Observation 4 — skip-caching-on-failure creates termination bugs in iterative pipelines (T07.1)
+
+T07.1's design call (d) prescribed *"skip caching not-found rows"* for the BAN reverse-geocode runner. Intent: preserve the option of recovering when BAN coverage improves. Unintended consequence: the work-set query used `NOT EXISTS (SELECT 1 FROM live.geocode_cache WHERE …)` to bound each chunk; not-found rows would NOT be cached, so the work-set never converged for stations BAN couldn't resolve. The runner went into an infinite loop on the second chunk, processing the same not-found stations repeatedly until manually killed (run `d3dbff58`, ~15 min runaway).
+
+Fix: negative-cache pattern with 30-day TTL — `score=0` entries that satisfy `NOT EXISTS` without satisfying the apply gate (≥0.5). Hard rule #4 atomicity preserved committed work; chunk-grain rollback meant zero state damage.
+
+**Forward practice:** when a work-set query is bounded by a `NOT EXISTS` predicate against a cache, **every queried input must produce a cache row regardless of outcome** (positive or negative-cache), or the loop will not terminate for failure cases. Skip-caching is appropriate only for one-shot idempotent runners that rebuild the cache from scratch, not for iterative chunked runners.
+
+### Observation 5 — Phase-1 audit numbers stop being load-bearing after T06b's PDC dedupe (W4-wide)
+
+Phase 1 §A.1 sampled the 224,467-row IRVE consolidated CSV; T06b's swap dedupes to 52,806 distinct stations via `DISTINCT ON (id_pdc_itinerance)` at PDC grain plus `DISTINCT ON (id_station_itinerance)` at station grain (E20). Per-operator distributions diverge sharply post-dedupe: Power Dot 13,896 → 1,142, Freshmile 9,274 → 3,110, QPARK 3,612 → 1,945, etc. T07.3's acceptance bar derived "≥21,097 successful geocodes" assuming 1:1 station-to-coord ratio (E22); reality was 1.39 dedupe factor. T08.0's "expected coverage" forecasts (28,789) drifted from measured (29,446) for the same reason.
+
+**Forward practice:** for any task that cites Phase-1 numbers as a baseline, **re-ground against current live state via `SELECT` before accepting the number as load-bearing**. Phase 1's value is qualitative (the existence of LIDL→Power Dot relationships, the structural shape of the dataset) — not quantitative (specific row counts post any T06+ transformation). The audit-blind-spot pattern (E17/E18/E19/E20/E22/E23) consistently traces to "sampled at the wrong grain" or "didn't measure cardinality at the relevant target grain." Future audits should cite both the source-grain count AND the post-transformation grain it predicts.
+
+---
+
+## Notes (paper trail, W4)
+
+### Source-row pattern divergence (T07 vs T08)
+
+T07's `live.sources` row for `ban_reverse_geocode` was inserted at runner startup via in-runner `INSERT ... ON CONFLICT (slug) DO NOTHING` (`tools/geocode/main.py:_ensure_ban_source_row`). T08's row for `operator_resolver` was inserted in migration `0016_operator_aliases.sql`. Both patterns work; both ship in M1.
+
+Migration-side is structurally cleaner (immutable, version-controlled, idempotent on re-apply, no startup cost, lint-gated by libpg_query/sqlfluff before merge). T07's runtime pattern was a deliberate choice at the time to avoid creating a migration just for the source row. T08's migration-side approach was natural because 0016 already carried operator/alias seed.
+
+**Not an erratum.** Documented for M2 housekeeping consolidation when a standardization decision becomes worth the churn.
