@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""IRVE consolidated-CSV ingestion runner (T06a).
+"""IRVE consolidated-CSV ingestion runner (T06a → T06b).
 
 Two modes:
 
@@ -11,7 +11,11 @@ Two modes:
 * full run (default) — downloads the IRVE consolidated CSV from
   data.gouv.fr, SHA-aborts on no-change, opens a ``live.ingestion_runs``
   row, COPYs the transformed stream into ``staging.irve_raw`` via
-  ``psql``.
+  ``psql``, then calls ``live.run_irve_swap()`` to upsert into
+  ``live.stations`` / ``live.charge_points``. The SQL function closes the
+  run row internally on the success / partial path; on swap failure the
+  runner issues a separate ``live.close_ingestion_run(..., 'failed', …)``
+  call per the E15 post-rollback contract.
 
 Env vars (full run only):
 
@@ -250,7 +254,11 @@ def validate_fixture(path: Path = FIXTURE_PATH) -> int:
 
 
 def _psql(sql: str, *, env: dict[str, str], capture: bool = True) -> str:
-    """Run psql with the URL from the env. Never log the URL."""
+    """Run psql with the URL from the env. Never log the URL.
+
+    Fails loud on non-zero exit (raises SystemExit). Default helper for
+    every shellout that should abort the runner on SQL error.
+    """
     db_url = env.get("SUPABASE_DB_URL")
     if not db_url:
         raise SystemExit("SUPABASE_DB_URL not set")
@@ -272,6 +280,72 @@ def _psql(sql: str, *, env: dict[str, str], capture: bool = True) -> str:
         line for line in raw.splitlines()
         if line.strip() and not _PSQL_TAG_RE.match(line.strip())
     )
+
+
+def _psql_no_raise(
+    sql: str, *, env: dict[str, str], capture: bool = True,
+) -> tuple[int, str, str]:
+    """Variant of `_psql` that returns the exit status instead of raising.
+
+    Returned tuple is ``(returncode, stdout_stripped, stderr_redacted)``:
+
+    * ``returncode``       — psql's exit code (0 on success).
+    * ``stdout_stripped``  — stdout with empty lines and ``_PSQL_TAG_RE``
+                             matches removed; same shape `_psql` produces
+                             on success.
+    * ``stderr_redacted``  — stderr with the SUPABASE_DB_URL replaced by a
+                             placeholder, so callers can include it in
+                             error messages safely.
+
+    Use this **only** on paths that need to handle non-zero exit
+    gracefully — primarily the `live.run_irve_swap` call, where a SQL
+    failure must NOT abort the runner: per E15, the runner has to issue
+    a separate post-rollback `live.close_ingestion_run(..., 'failed', …)`
+    statement after the swap txn rolls back. Every other psql shellout
+    in this file uses `_psql`, which fails loud.
+    """
+    db_url = env.get("SUPABASE_DB_URL")
+    if not db_url:
+        raise SystemExit("SUPABASE_DB_URL not set")
+    cmd = [
+        "psql", db_url,
+        "-v", "ON_ERROR_STOP=1",
+        "-tAc", sql,
+    ]
+    result = subprocess.run(
+        cmd, check=False, capture_output=capture, text=True,
+    )
+    raw_stdout = (result.stdout or "").strip()
+    stdout_stripped = "\n".join(
+        line for line in raw_stdout.splitlines()
+        if line.strip() and not _PSQL_TAG_RE.match(line.strip())
+    )
+    stderr_redacted = (result.stderr or "").replace(
+        db_url, "[SUPABASE_DB_URL]"
+    )
+    return result.returncode, stdout_stripped, stderr_redacted
+
+
+def _status_from_swap_jsonb(payload: dict) -> str:
+    """Compute the terminal status from a `live.run_irve_swap` jsonb return.
+
+    Single source of truth for the success / partial trichotomy:
+
+    * ``rows_skipped == 0`` → ``'success'``
+    * ``rows_skipped > 0``  → ``'partial'``
+
+    The third terminal value, ``'failed'``, is **never** returned by this
+    helper. Failure means the swap raised before any jsonb existed; the
+    failure path in `full_run()` writes the literal ``'failed'`` directly
+    when issuing the post-rollback `close_ingestion_run` call (E15).
+
+    Raises ``KeyError`` if ``rows_skipped`` is absent: the jsonb shape is
+    a documented SQL contract (see `live.run_irve_swap`'s comment in
+    0012_irve_swap_functions.sql) and a missing key signals a contract
+    violation worth surfacing loudly, not silently defaulting.
+    """
+    rows_skipped = payload["rows_skipped"]
+    return "partial" if rows_skipped > 0 else "success"
 
 
 def _read_required_env(name: str) -> str:
@@ -451,11 +525,22 @@ def _upsert_meta(env: dict[str, str], sha: str) -> None:
 
 
 def full_run() -> int:
-    """Download → SHA-abort or COPY → open ingestion_runs row.
+    """Download → SHA-abort or stage → swap into live → terminal status.
 
-    T06a leaves the row at status='running' on the COPY-load path; T06b
-    transitions it to success/failed/partial. The SHA-abort path inserts
-    a fully-closed status='success' row in one shot.
+    On the load path: open ingestion_runs row at status='running',
+    TRUNCATE+COPY into staging.irve_raw, call live.run_irve_swap which
+    upserts into live.stations / live.charge_points and closes the run
+    row internally to 'success' or 'partial' per
+    `_status_from_swap_jsonb`. On swap failure the txn rolls back and
+    the runner issues a separate close_ingestion_run(..., 'failed', …)
+    per E15.
+
+    The SHA-abort path inserts a fully-closed status='success' row in
+    one shot.
+
+    `staging.ingestion_run_meta` is only advanced after a successful
+    swap+close, so a failed run leaves the SHA cache untouched and the
+    next workflow run retries naturally without --force-refresh.
     """
     env = {k: v for k, v in os.environ.items() if v is not None}
     git_sha = _read_required_env("GIT_SHA")
@@ -523,15 +608,86 @@ def full_run() -> int:
         f"unknown_columns={unknown_cols}, took {t_copy:.1f}s"
     )
 
+    # ─── swap into live ──────────────────────────────────────────────
+    # live.run_irve_swap closes the ingestion_runs row internally on
+    # success/partial via PERFORM live.close_ingestion_run(...). Do NOT
+    # issue a redundant close from here on the success path — would
+    # double-write finished_at and contradict the SQL design (see
+    # 0012_irve_swap_functions.sql:449 and the close_ingestion_run
+    # COMMENT on lines 144-145). On failure (psql returncode != 0) the
+    # swap txn has already rolled back, so the runner MUST issue a
+    # separate close_ingestion_run with status='failed' as a
+    # post-rollback statement (E15 forward practice).
+    # _upsert_meta runs only after a successful swap+close, so a failed
+    # swap leaves the SHA cache at the previous value and the next
+    # workflow run retries naturally.
+    t3 = time.monotonic()
+    swap_rc, swap_stdout, swap_stderr = _psql_no_raise(
+        f"SELECT live.run_irve_swap('{run_id}'::uuid)",
+        env=env,
+    )
+    t_swap = time.monotonic() - t3
+
+    if swap_rc != 0:
+        error_message = (
+            swap_stderr.strip() or f"run_irve_swap exited {swap_rc}"
+        )[:500]
+        # E15: separate post-rollback statement; NOT in the swap's txn.
+        _psql(
+            "SELECT live.close_ingestion_run("
+            f"'{run_id}'::uuid, 'failed', '{{}}'::jsonb, "
+            + _quote_sql_literal(error_message)
+            + ")",
+            env=env,
+        )
+        print(
+            f"# swap FAILED: ingestion_runs.id={run_id} closed to "
+            f"status=failed; took {t_swap:.1f}s; "
+            f"error={error_message}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    swap_payload = json.loads(swap_stdout)
+    expected_status = _status_from_swap_jsonb(swap_payload)
+    sql_status = swap_payload.get("status")
+    if sql_status != expected_status:
+        # SQL is authoritative (it did the actual close); local helper is
+        # a sanity check. Disagreement is a contract violation worth
+        # flagging without failing the run.
+        print(
+            f"# WARN: status drift — sql={sql_status!r} "
+            f"local={expected_status!r}. SQL is authoritative; flagging "
+            f"for future investigation.",
+            file=sys.stderr,
+        )
+
     _upsert_meta(env, sha)
+
+    print(
+        f"# swap: status={sql_status} "
+        f"rows_seen={swap_payload['rows_seen']} "
+        f"rows_inserted={swap_payload['rows_inserted']} "
+        f"rows_updated={swap_payload['rows_updated']} "
+        f"rows_skipped={swap_payload['rows_skipped']}"
+    )
+    print(
+        f"# stations: inserted={swap_payload['stations_inserted']} "
+        f"updated={swap_payload['stations_updated']} "
+        f"skipped={swap_payload['stations_skipped']}"
+    )
     print(
         f"# meta: staging.ingestion_run_meta upserted with sha={sha[:12]}…"
     )
-
     print(
-        f"# T06a complete; T06b will close ingestion_runs.id={run_id}. "
-        f"Wall-clock: download={t_download:.1f}s, "
-        f"truncate={t_truncate:.1f}s, copy={t_copy:.1f}s"
+        f"# T06b complete; ingestion_runs.id={run_id} closed by SQL "
+        f"to status={sql_status}."
+    )
+    print(
+        f"# wall-clock: download={t_download:.1f}s, "
+        f"truncate={t_truncate:.1f}s, copy={t_copy:.1f}s, "
+        f"swap+close={t_swap:.1f}s "
+        f"(sql_internal_duration_ms={swap_payload['duration_ms']})"
     )
     return 0
 
