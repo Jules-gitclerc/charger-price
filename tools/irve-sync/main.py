@@ -698,6 +698,18 @@ def full_run(force_refresh: bool = False) -> int:
 
     _upsert_meta(env, sha)
 
+    # T13.0 §0 gap resolution (Option C): copy tarification from
+    # staging to live.stations BEFORE truncate. The parser orchestrator
+    # (T13.2) reads from live.stations.tarification — without this
+    # step, the column stays NULL and parsers have no source. Failure
+    # here aborts before truncate so staging is preserved for retry.
+    # Migration 0018 provides the function and column.
+    copy_tarif_stdout = _psql(
+        "SELECT live.copy_tarification_from_staging()", env=env
+    )
+    copy_tarif_count = copy_tarif_stdout.strip()
+    print(f"# tarification: {copy_tarif_count} live.stations rows updated (T13.0 §0 gap)")
+
     # E21 forward-practice (a): truncate staging post-success so the
     # next run starts with a clean slate. The failure path above
     # SystemExits before reaching here, so failures preserve staging
