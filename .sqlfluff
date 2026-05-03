@@ -34,3 +34,4 @@ max_line_length = 200
 # Keep this minimal — the rules are excluded above anyway.
 indent_unit = space
 tab_space_size = 2
+
