@@ -64,9 +64,28 @@ Acceptance bar:
 
 Note on per-clause counts: the smoke reports counts AFTER strip-and-extract sequencing (time_window_X and default_X strip their matches before bare_X runs). So `bare_energy` smoke count = (independent regex count) - (time_window_energy) - (default_energy). This is the runtime reality of what the parser emits per clause, not what naive regex counting would suggest. Reconciles to: bare_energy 6,592 = 39,787 - 17,425 - 15,770 ✓.
 
+### `regex-kwh.ts` — P2 regex €/kWh parser (T12)
+
+Applies `parseRegexKwh` to every CSV row. Reports success/rejected breakdown, per-clause histogram (energy_eur_per_kwh / energy_cts_integer / time_eur_per_min / time_eur_per_hour / flat_session), per-enseigne distribution (top 15), centimes interpretation note count, decimal-cts ambiguity input count (probe-based), subscription markers, prefix contexts, multi-clause inputs, time-window informational notes, and 4 FP guards against P5 sentinel + P0 DRIVECO + P1 CITEOS + P3 URL territory.
+
+```
+pnpm exec tsx tools/parsers-smoke/regex-kwh.ts
+pnpm exec tsx tools/parsers-smoke/regex-kwh.ts --csv path/to/alt.csv
+```
+
+Acceptance bar:
+- success rate ≥ 99% of attempted (current baseline: 11,660 / 11,685 = 99.79%)
+- decimal-cts input rows = 21 ±5 (sole-clause-decimal-cts rows that reject; EVBOX + ZEENCO + tail)
+- hallmark+0-clauses ≤ 100 (current: 25 = 21 decimal-cts + 4 inline-connector edge cases like `0.25AC €/kWh`)
+- All 4 FP guards = 0 (P5/P0/P1/P3)
+
+Note on the decimal-cts metric: counted via probe regex on raw input, NOT via warning iteration on parser results. Sole-clause decimal-cts rows reject (no successful result to iterate warnings from); the probe catches them all regardless of outcome.
+
+cts disposition (per T12 design DC-T12-A): integer cts ≥ 1 = centimes by industry convention (× 0.01 to €/kWh, with per-element note); decimal cts < 1 = ambiguous (drop element + warning, since 0.30 cts could mean 0.003 €/kWh or be a typo for 0.30 €/kWh — 100× spread, do not silently coerce).
+
 ## Adding a new smoke runner
 
-When a new parser module lands (T12 P2 regex, T13 P3 URL), add a sibling smoke script following the `sentinel.ts` / `driveco-json.ts` / `citeos-template.ts` shape:
+When a new parser module lands (T13 P3 URL), add a sibling smoke script following the established shape:
 
 1. Pure read of `.cache/irve.csv`
 2. Apply the parser to each row
