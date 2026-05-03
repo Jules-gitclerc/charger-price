@@ -32,3 +32,11 @@ echo "$STAGED_MIGRATIONS" | sed 's/^/    /'
 # xargs to pass each file individually (sqlfluff accepts multiple paths
 # but per-file output is easier to read on failure).
 echo "$STAGED_MIGRATIONS" | xargs sqlfluff lint
+
+# libpg_query parse gate. Catches the orphan IF/THEN/END IF and similar
+# constructs that sqlfluff silently passes (proven by .lint-fixtures/
+# orphan-if-outside-do.sql.bad — sqlfluff exits 0, libpg_query exits 1).
+# The script is pure WASM (pg-query-emscripten), no native build needed.
+echo "→ libpg_query parse on staged migrations"
+# shellcheck disable=SC2086  # word splitting intentional (newline-delimited list)
+echo "$STAGED_MIGRATIONS" | xargs node scripts/lint/libpg-query.cjs

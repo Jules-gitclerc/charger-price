@@ -28,6 +28,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.4",
     "husky": "^9.1.7",
+    "pg-query-emscripten": "^5.1.0",
     "tailwindcss": "^4",
     "typescript": "^5"
   }
