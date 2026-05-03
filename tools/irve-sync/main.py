@@ -33,11 +33,20 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Iterable
+
+# Postgres command tags that the supavisor session pooler returns on stdout
+# alongside the actual result tuples (the direct connection suppresses these
+# in -tA mode; the pooler does not). Surfaced in T06a step 3 first real run.
+_PSQL_TAG_RE = re.compile(
+    r"^(?:INSERT \d+ \d+|UPDATE \d+|DELETE \d+|SELECT \d+|MERGE \d+|"
+    r"COPY \d+|TRUNCATE TABLE|BEGIN|COMMIT|ROLLBACK)$"
+)
 
 # ---------------------------------------------------------------------------
 # Constants — must stay in sync with supabase/migrations/0011_staging_irve_raw.sql
@@ -258,7 +267,11 @@ def _psql(sql: str, *, env: dict[str, str], capture: bool = True) -> str:
         # Strip the URL from any error message before re-raising.
         stderr = (exc.stderr or "").replace(db_url, "[SUPABASE_DB_URL]")
         raise SystemExit(f"psql failed: {stderr}") from None
-    return (result.stdout or "").strip()
+    raw = (result.stdout or "").strip()
+    return "\n".join(
+        line for line in raw.splitlines()
+        if line.strip() and not _PSQL_TAG_RE.match(line.strip())
+    )
 
 
 def _read_required_env(name: str) -> str:
