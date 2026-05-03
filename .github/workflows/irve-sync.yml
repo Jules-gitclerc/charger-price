@@ -8,10 +8,13 @@ name: irve-sync
 # T06b's swap function (migration 0012, future) closes the run row.
 #
 # SECURITY NOTE: this workflow does NOT use any github.event.* untrusted
-# inputs in run: blocks. The only untrusted-ish env we use is
-# `inputs.dry_run` from workflow_dispatch, which is a typed boolean and
-# cannot inject shell. SUPABASE_DB_URL is a repo secret and is never
-# logged by tools/irve-sync/main.py (subprocess errors strip it).
+# inputs in run: blocks. The only untrusted-ish workflow_dispatch inputs
+# we use are `inputs.dry_run` and `inputs.force_refresh`, both typed
+# booleans. Both are passed through env vars (DRY_RUN, FORCE_REFRESH)
+# and consumed via shell `[[ "$VAR" == "true" ]]` checks — never
+# interpolated into a run: line via `${{ }}`. SUPABASE_DB_URL is a repo
+# secret and is never logged by tools/irve-sync/main.py (subprocess
+# errors strip it).
 #
 # Concurrency rule per T06a brief design call C4: schedule invocations
 # cancel a stuck predecessor (the next cron always wins); workflow_dispatch
@@ -26,6 +29,11 @@ on:
     inputs:
       dry_run:
         description: 'Telemetry-only (download + hash + orphan sweep). Skips TRUNCATE / COPY / meta upsert. Inserts a closed status=success row in live.ingestion_runs with error_message=dry_run.'
+        type: boolean
+        default: false
+        required: false
+      force_refresh:
+        description: 'Operator-only escape hatch: clear staging.ingestion_run_meta for the IRVE slug before the SHA check, forcing the runner to re-process even when upstream is unchanged. No-op when combined with dry_run=true (dry-run early-exits before the cache DELETE — see full_run() mode matrix).'
         type: boolean
         default: false
         required: false
@@ -83,4 +91,13 @@ jobs:
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           GIT_SHA: ${{ github.sha }}
-        run: python3 tools/irve-sync/main.py
+          FORCE_REFRESH: ${{ inputs.force_refresh }}
+        # FORCE_REFRESH is a typed boolean from workflow_dispatch; consumed
+        # via shell test, never interpolated. Result is appended to argv
+        # as `--force-refresh` only when the input was checked.
+        run: |
+          args=()
+          if [[ "$FORCE_REFRESH" == "true" ]]; then
+            args+=(--force-refresh)
+          fi
+          python3 tools/irve-sync/main.py "${args[@]}"
