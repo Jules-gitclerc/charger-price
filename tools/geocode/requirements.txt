@@ -1,0 +1,5 @@
+# T07 BAN reverse-geocode runner — dependency pin.
+# Stdlib `csv` + `subprocess` + `argparse` + `datetime` cover everything else.
+# DO NOT add psycopg2, pandas, geopy, or any geocoding helper library
+# without a written justification in the relevant T07 brief.
+requests==2.32.*

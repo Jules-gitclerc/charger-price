@@ -1,0 +1,5 @@
+longitude,latitude,result_longitude,result_latitude,result_distance,result_label,result_type,result_id,result_housenumber,result_name,result_street,result_postcode,result_city,result_context,result_citycode,result_oldcitycode,result_oldcity,result_district,result_status
+2.349000,48.864000,,,3,13 Rue de Turbigo 75002 Paris,housenumber,75102_9504_00013,13,13 Rue de Turbigo,Rue de Turbigo,75002,Paris,"75, Paris, Île-de-France",75102,,,Paris 2e Arrondissement,ok
+1.234000,47.123000,,,347,Le Bourg 36230 Vatan,locality,36229_0000,,,,36230,Vatan,"36, Indre, Centre-Val de Loire",36229,,,,ok
+-5.600000,48.500000,,,12000,Place du Bourg 29242 Île-d'Ouessant,locality,29155_0000,,,,29242,Île-d'Ouessant,"29, Finistère, Bretagne",29155,,,,ok
+4.349000,50.851000,,,,,,,,,,,,,,,,,not-found
