@@ -68,6 +68,8 @@
 // behavior change. No semver; the only question is "did behavior
 // change?". Shared across all P-stage parsers.
 
+import { round4 } from './_units';
+
 export const PARSER_VERSION = 'driveco-json-v1' as const;
 
 const INTERVAL_NOTE =
@@ -109,13 +111,6 @@ function isFiniteNonNegNumber(v: unknown): v is number {
 
 function isNonNegInt(v: unknown): v is number {
   return typeof v === 'number' && Number.isInteger(v) && v >= 0;
-}
-
-// Round to 4 decimals (matches numeric(10,4) precision in 0004).
-// Eliminates 0.20 * 60 = 12.000000000000002 style float drift before
-// the value lands in the parser output.
-function round4(n: number): number {
-  return Math.round(n * 10_000) / 10_000;
 }
 
 type ValidatedOsfEntry = {
