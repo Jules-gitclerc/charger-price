@@ -48,9 +48,25 @@ Acceptance bar (stricter than T09 because T10 has zero ambiguity in input space)
 
 Exit codes match `sentinel.ts`. The cross-tab makes pattern-correlation drift visible — if a future DRIVECO row ships an `energyPrice` value with the wrong matrixOSF pattern, the table reveals it directly.
 
+### `citeos-template.ts` — P1 CITEOS template parser (T11)
+
+Applies `parseCiteosTemplate` to every CSV row, reporting per-clause-type histogram (across all extracted elements), per-enseigne distribution (11 enseignes share the template — multi-operator scope), top-10 clause-set signature distribution (drift signal), comma-bug repair count, multi-price warning count, and FP guards against P5 sentinel + P0 DRIVECO territory.
+
+```
+pnpm exec tsx tools/parsers-smoke/citeos-template.ts
+pnpm exec tsx tools/parsers-smoke/citeos-template.ts --csv path/to/alt.csv
+```
+
+Acceptance bar:
+- success rate ≥ 99% of attempted (current baseline: 12,020 / 12,020 = 100%)
+- hallmark+0-clauses = 0 (exact baseline — would signal a new clause variant unseen in pre-flight)
+- sentinel + DRIVECO territory overlap = 0 (P5 + P0 short-circuit before P1)
+
+Note on per-clause counts: the smoke reports counts AFTER strip-and-extract sequencing (time_window_X and default_X strip their matches before bare_X runs). So `bare_energy` smoke count = (independent regex count) - (time_window_energy) - (default_energy). This is the runtime reality of what the parser emits per clause, not what naive regex counting would suggest. Reconciles to: bare_energy 6,592 = 39,787 - 17,425 - 15,770 ✓.
+
 ## Adding a new smoke runner
 
-When a new parser module lands (T11 P1 CITEOS, T12 P2 regex, T13 P3 URL), add a sibling smoke script following the `sentinel.ts` / `driveco-json.ts` shape:
+When a new parser module lands (T12 P2 regex, T13 P3 URL), add a sibling smoke script following the `sentinel.ts` / `driveco-json.ts` / `citeos-template.ts` shape:
 
 1. Pure read of `.cache/irve.csv`
 2. Apply the parser to each row
