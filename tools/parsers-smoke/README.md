@@ -32,9 +32,25 @@ Exit codes:
 
 The pre-flight floor (`EXPECTED_TOTAL_FLOOR = 175,472`) is anchored to the T09 pre-flight count of 184,708 sentinel hits in `.cache/irve.csv` as of 2026-05-02. The 5% tolerance absorbs minor day-over-day IRVE variance without false alarms; widening the gap signals either a meaningful upstream shift or a parser regression — both worth investigating before commit.
 
+### `driveco-json.ts` — P0 DRIVECO JSON parser (T10)
+
+Attempts `parseDriveCoJson` on every CSV row whose `tarification` matches the DRIVECO detection criterion (`starts-with-'{' AND contains 'energyPrice'`). Reports success/error/rejected breakdown, an `energyPrice × matrixOSF pattern` cross-tab, and a false-positive guard against P5 sentinel territory.
+
+```
+pnpm exec tsx tools/parsers-smoke/driveco-json.ts
+pnpm exec tsx tools/parsers-smoke/driveco-json.ts --csv path/to/alt.csv
+```
+
+Acceptance bar (stricter than T09 because T10 has zero ambiguity in input space):
+- success rate ≥ 99% of attempted (current baseline: 1,553 / 1,553 = 100%)
+- error count = 0 AND rejected count = 0 (exact baseline)
+- sentinel-territory overlap = 0 (P5 should short-circuit before P0; the guard catches confused inputs)
+
+Exit codes match `sentinel.ts`. The cross-tab makes pattern-correlation drift visible — if a future DRIVECO row ships an `energyPrice` value with the wrong matrixOSF pattern, the table reveals it directly.
+
 ## Adding a new smoke runner
 
-When a new parser module lands (T10 P0 DRIVECO, T11 P1 CITEOS, T12 P2 regex, T13 P3 URL), add a sibling smoke script following the `sentinel.ts` shape:
+When a new parser module lands (T11 P1 CITEOS, T12 P2 regex, T13 P3 URL), add a sibling smoke script following the `sentinel.ts` / `driveco-json.ts` shape:
 
 1. Pure read of `.cache/irve.csv`
 2. Apply the parser to each row
