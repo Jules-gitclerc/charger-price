@@ -44,6 +44,11 @@ next-env.d.ts
 # Local cache (Phase 1 IRVE CSV scan, see docs/01-discovery.md A.1)
 /.cache/
 
+# drizzle-kit auto-emits this on `introspect` / `check`. Migrations are
+# hand-authored under supabase/migrations/[0-9]{4}_*.sql; the meta journal
+# is not part of our migration history.
+/supabase/migrations/meta/
+
 # Override the user's global gitignore (~/.gitignore_global) that strips docs/
 # — Prix-Bornes commits its phase docs as part of the project record.
 !docs/
