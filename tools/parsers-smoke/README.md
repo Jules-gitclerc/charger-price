@@ -83,9 +83,25 @@ Note on the decimal-cts metric: counted via probe regex on raw input, NOT via wa
 
 cts disposition (per T12 design DC-T12-A): integer cts ≥ 1 = centimes by industry convention (× 0.01 to €/kWh, with per-element note); decimal cts < 1 = ambiguous (drop element + warning, since 0.30 cts could mean 0.003 €/kWh or be a typo for 0.30 €/kWh — 100× spread, do not silently coerce).
 
+### `url-extractor.ts` — P3 URL extractor parser (T13.1)
+
+Applies `parseUrlExtractor` to every CSV row. Reports success/rejected/errored breakdown, per-distinct-URL distribution (11 URLs in current data, highly concentrated), per-enseigne distribution (top 10), and 4 FP guards against P5 sentinel + P0 DRIVECO + P1 CITEOS + P2 regex-kwh territory.
+
+```
+pnpm exec tsx tools/parsers-smoke/url-extractor.ts
+pnpm exec tsx tools/parsers-smoke/url-extractor.ts --csv path/to/alt.csv
+```
+
+Acceptance bar (strictest of the parser smokes — pre-flight showed 0 ambiguity in input space):
+- successfully parsed = exact baseline 8,384 (NOT a tolerance band — drift = signal worth investigating)
+- errored count = 0 (URL constructor must not throw on any hallmark-matching input)
+- All 4 FP guards = 0 (P5/P0/P1/P2)
+
+P3 ships ZERO station_tariffs writes: it extracts a pointer (URL) for M2 follow-up scraping, not a price. T13.2 orchestrator records the URL in `parser_outcomes.parsed_value_json.url` AND in `live.stations.tariff_url` (existing column from T06b). The viewer interprets absence of a station_tariffs row as "tarif non communiqué".
+
 ## Adding a new smoke runner
 
-When a new parser module lands (T13 P3 URL), add a sibling smoke script following the established shape:
+The 5 W5 parser smokes (T09 P5 + T10 P0 + T11 P1 + T12 P2 + T13.1 P3) are now complete. T13.2 orchestrator wires them into a pipeline. Future parsers (M1.5+ Electra, etc.) follow the established shape:
 
 1. Pure read of `.cache/irve.csv`
 2. Apply the parser to each row
