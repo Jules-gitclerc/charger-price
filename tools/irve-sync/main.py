@@ -698,6 +698,19 @@ def full_run(force_refresh: bool = False) -> int:
 
     _upsert_meta(env, sha)
 
+    # E21 forward-practice (a): truncate staging post-success so the
+    # next run starts with a clean slate. The failure path above
+    # SystemExits before reaching here, so failures preserve staging
+    # for forensics. Without this, 211k rows (~150-200 MB transient)
+    # sit in staging for ~24h between runs, which is what tipped the
+    # free-tier 500 MB database ceiling during T06b.3.a — see
+    # docs/migrations-errata.md E21.
+    _truncate_staging(env)
+    print(
+        "# staging: irve_raw truncated post-swap "
+        "(E21 disk-discipline; failure path preserves staging for forensics)"
+    )
+
     print(
         f"# swap: status={sql_status} "
         f"rows_seen={swap_payload['rows_seen']} "
