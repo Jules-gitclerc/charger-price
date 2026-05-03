@@ -1,0 +1,5 @@
+# T06a IRVE sync runner — dependency pin.
+# Stdlib `csv` + `hashlib` + `subprocess` + `argparse` cover everything else.
+# DO NOT add psycopg2, pandas, or any CSV-helper library without a written
+# justification in the relevant T06 brief.
+requests==2.32.*
