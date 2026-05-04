@@ -21,10 +21,29 @@ name: irve-sync
 # invocations queue (manual = intentional, no surprise kills).
 
 on:
-  schedule:
-    # 01:00 UTC daily = 02:00 CET (winter) / 03:00 CEST (summer). After
-    # the data.gouv.fr Paris-time daily refresh window.
-    - cron: '0 1 * * *'
+  # SCHEDULE DISABLED (W5, 2026-05-04): the swap step hits E21 disk-full
+  # (FileFallocate, no space left on device) on Supabase free tier — the
+  # exact failure mode that motivated the T13.0.5 workaround. Daily cron
+  # was looping E21 instances #4+, polluting ingestion_runs with
+  # status=failed rows nightly.
+  #
+  # Re-enable the schedule when ANY ONE of these M1.5 removal triggers
+  # fires (also documented in docs/migrations-errata.md "T13.0.5 — M1
+  # workaround framing"):
+  #   1. Supabase Pro tier disk allocation verified at 8 GB AND a manual
+  #      workflow_dispatch invocation succeeds without FileFallocate
+  #   2. Chunked-swap refactor of run_irve_swap landed (incremental TEMP
+  #      table population to bound peak temp-space usage)
+  #   3. Migration to non-free-tier hosted Postgres
+  # Until then, live.stations.tarification is loaded by tools/load-
+  # tarification-from-cache/main.py (T13.0.5) on operator demand.
+  #
+  # When re-enabling: uncomment the schedule block AND restore
+  # `cancel-in-progress: ${{ github.event_name == 'schedule' }}` below.
+  # workflow_dispatch stays available throughout for manual probes.
+  #
+  # schedule:
+  #   - cron: '0 1 * * *'   # 01:00 UTC = 02:00 CET / 03:00 CEST
   workflow_dispatch:
     inputs:
       dry_run:
