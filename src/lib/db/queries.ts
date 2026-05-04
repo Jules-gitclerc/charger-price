@@ -96,6 +96,10 @@ export type StationDetail = {
   consolidated_code_postal: string | null;
   consolidated_commune: string | null;
   tariff_url: string | null;
+  /** Raw IRVE `tarification` field (post-T13.0.5 station-grain dedupe). NULL
+   *  if no PDC at this station carried a non-empty value. Used by the
+   *  qualité-des-données mini-section on the detail page. */
+  tarification_raw: string | null;
   /** Max power across the station's PDCs, kW. */
   max_power_kw: number | null;
   /** Total PDC count at this station. */
@@ -274,6 +278,7 @@ export async function getStationDetail(
       s.consolidated_code_postal,
       s.consolidated_commune,
       s.tariff_url,
+      s.tarification AS tarification_raw,
       o.display_name AS operator_display_name,
       (
         SELECT MAX(cp.power_kw)
@@ -357,6 +362,7 @@ export async function getStationDetail(
       (h.consolidated_code_postal as string | null) ?? null,
     consolidated_commune: (h.consolidated_commune as string | null) ?? null,
     tariff_url: (h.tariff_url as string | null) ?? null,
+    tarification_raw: (h.tarification_raw as string | null) ?? null,
     max_power_kw: num(h.max_power_kw),
     pdc_count: numOr(h.pdc_count, 0),
     tariffs: tariffRows.map((tr) => ({
