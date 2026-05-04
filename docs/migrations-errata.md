@@ -283,3 +283,128 @@ T07's `live.sources` row for `ban_reverse_geocode` was inserted at runner startu
 Migration-side is structurally cleaner (immutable, version-controlled, idempotent on re-apply, no startup cost, lint-gated by libpg_query/sqlfluff before merge). T07's runtime pattern was a deliberate choice at the time to avoid creating a migration just for the source row. T08's migration-side approach was natural because 0016 already carried operator/alias seed.
 
 **Not an erratum.** Documented for M2 housekeeping consolidation when a standardization decision becomes worth the churn.
+
+---
+
+## E22 — application notes (W5 expansion)
+
+After E22's original W4 entry, three W5 sites added concrete data:
+
+- **T13.0 design summary** said "33 operators" while the seed had 34 (caught pre-commit by COMMENT review — hard rule #4 catch #8 in W4).
+- **T11 design summary** forecast 28,789 station coverage; measured 29,446 — same pattern as the T08 self-count drift (locked-bar pattern absorbed via post-flight verification).
+- **T12 design summary** forecast 32 decimal-cts rejections; measured 21 — post-flight baseline correction; smoke gate anchored to the verified value, not the forecast.
+
+The eyeball-vs-programmatic-counting discrepancy now has 5+ instances across W4+W5. **Forward-practice expansion:** any "N operators / N aliases / N rows" claim in design summaries must be cross-verified by SQL count or programmatic VALUES line-count before locking acceptance bars. Pattern is structural, not incidental.
+
+---
+
+## E24 — `live.stations.consolidated_code_postal` lacks an index post-T07; single-query CTE form Seq Scans 52,806 rows = 2,022 ms (T15.1 viewer)
+
+- **Surfaced:** T15.1 pre-flight (Wasquehal demo query probe via Supabase MCP).
+- **What's wrong:** The "natural" single-query shape for the search anchor — `WITH center AS (SELECT AVG(ST_X(geom::geometry)) ... WHERE consolidated_code_postal = $1) SELECT ... FROM stations CROSS JOIN center ORDER BY geom <-> center LIMIT 10` — forces a Seq Scan over all 52,806 rows because the AVG aggregate materializes the entire postal-filter set before the KNN can stream. Measured 2,022 ms (over the 2 s M1 viewer budget).
+- **Action taken:** None on schema or migrations. T15.1's `searchStationsByPostal` uses a two-query workaround: (a) `LIMIT 1` postal-anchor lookup ≈ 30 ms (early-stop seq scan, only one row needed), then (b) KNN with literal `lng`, `lat` coordinates ≈ 150 ms. Total ≈ 180 ms server-side. Hard rule W5 #8 ("no new indexes for M1") preserved. Documented in the queries.ts top comment so the maintainer who eventually adds the index can collapse to one query.
+- **Empirical wall-clock (T15.2 smoke):** `/internal/search?q=59290` = 782 ms cold including postgres-js pool init; subsequent calls ≈ 180 ms. Well under the 2 s budget.
+- **Forward practice:** add a btree index on `consolidated_code_postal` in M1.5 once viewer search patterns stabilize, then refactor to the single-query CTE form. The single-row early-stop already works fine; the index unlocks the AVG-aggregate-friendly form for any future feature that needs the postal-set centroid (radius queries, postal heatmaps).
+
+---
+
+## Audit-blind-spot pattern, instances #7–#10 (W5)
+
+- **#7 (T10 pre-flight, DRIVECO JSON):** Phase 1 §D.1 reported "5 distinct DRIVECO schemas." Reality: 1 top-level shape signature with 5 distinct value-tuples in `energyPrice`. **Forward-practice:** distinguish "shape" (top-level key signature, structural type) from "value distribution" (numeric/string variants within a fixed shape).
+- **#8 (T11 pre-flight, CITEOS):** Phase 1 §D.1 + §D.2 framed as 8,656 rows / ~65 distinct values / "CPO CITEOS" enseigne family. Reality: 12,020 rows (+39%), 131 distinct values (~2×), 11 enseignes (CITEOS variants + eborn 3,443 + Easy Charge Services 1,306 + AVIA VOLT 117), `default_start_fee` ("prix de départ") clause type 226 occurrences missed entirely. **Forward-practice:** when a template hallmark is detected, count enseigne distribution before scoping the parser; do not assume operator-template 1:1 correspondence.
+- **#9 (T12 pre-flight, regex €/kWh):** Phase 1 §D.1 framed `PRICE_KWH_NL` ~ 8,351 rows €/kWh family. Pre-flight surfaced a parallel `cts/kWh` family of 3,265 rows missed entirely (3,233 integer-centimes + 32 decimal-cts ambiguity). Net hallmark volume +40%. The cts family includes major operators: Carrefour Energies 1,573, ALLEGO 1,173 — not just the EVBOX outlier Phase 1 named. **Forward-practice:** when surveying free-text price patterns, enumerate ALL unit symbols (€, cts, ct, EUR, euro, cents) per family before scoping the parser.
+- **#10 (T13.0 pre-flight, station-grain tarification conflict):** 3,052 of 14,151 content-bearing stations (21.6%) have ≥ 2 distinct `tarification` values across their PDCs. Real examples: `FR3R3P89882136` carries '0,36 €/kWh' AND '0,55 €/kWh' (likely AC vs DC connectors); `FRA68P68021001` carries '15' AND '0,40' (FLAT vs per-kWh). PDC-grain Phase-1 numbers do not predict station-grain reality. **Forward-practice:** when copying staging→live across grain boundaries, `DISTINCT ON` the target grain with explicit `ORDER BY` priority field. Same pattern as E20.
+
+**Cumulative pattern (10 instances E17/E18/E19/E20/E22/E23 + #7/#8/#9/#10):** Phase 1 audit method has consistent failure modes — distinct-value sampling without per-key cardinality + cross-dimension cardinality + destination-type round-trip + post-transformation grain re-grounding + long-tail composition + shape-vs-value-distribution + multi-operator-scope assumption + unit-symbol enumeration + cross-grain conflict assumption. Bundle as **"Phase 1 audit checklist v2"** if M2 introduces a new dataset.
+
+---
+
+## E21 — instances #2 + #3 (Supabase free-tier disk-full recurrence + Pro-tier-disk gotcha)
+
+After E21's original W3 entry (cluster-level read-only flip), W5 added two further instances of disk-pressure failures along the same staging→live swap path:
+
+- **E21 instance #2 (W5, T13.2 first attempt):** Pre-T13.2 IRVE sync hit `FileFallocate` disk-full at the `CREATE TEMP TABLE valid_pdcs` step. DB went from 134 MB → 452 MB (90.4% of 500 MB free-tier ceiling) before failure. Hard rule #4 atomicity held: the swap rolled back, zero `live.*` pollution. Recovery via `TRUNCATE staging.irve_raw` + `VACUUM` → back to 134 MB baseline.
+- **E21 instance #3 (W5, T13.2 second attempt post-Pro-tier-upgrade):** **Pro tier upgrade DID NOT prevent recurrence.** Same `FileFallocate` failure mode, same temp-table allocation step. Pro tier raises the database-size logical ceiling 500 MB → 8 GB, but the underlying disk volume must be auto-resized OR manually grown OR project-restarted for the new allocation to take effect. `pg_database_size()` reports table/index data only; doesn't count WAL or temp space backed by the physical disk volume.
+
+**Forward-practice expansion (E21 (c) update):** "Pro tier upgrade alone may not raise the underlying disk volume on Supabase managed instances. Verify Disk Size in Settings → Billing → Usage post-upgrade, and confirm successful sync before declaring disk pressure resolved. Operator may choose workaround paths that bypass staging entirely if Pro upgrade is rejected on cost grounds."
+
+**Operator decision (W5):** Path B workaround (T13.0.5 local cache loader) chosen over Pro tier. M1 ships on free tier with documented removal triggers (next entry).
+
+---
+
+## T13.0.5 — M1 workaround framing (W5)
+
+`tools/load-tarification-from-cache/main.py` loads `live.stations.tarification` directly from `.cache/irve.csv` via 5,000-row chunked UPDATEs, bypassing the `staging.irve_raw` swap pipeline that hits E21 disk-full failures on free-tier Postgres. Uses the same canonical-row strategy as `live.copy_tarification_from_staging()` (`DISTINCT ON id_station_itinerance ORDER BY date_maj DESC NULLS LAST`) for behavioral parity. **Net DB delta:** ~7 MB (vs +318 MB for the swap path).
+
+**M1.5 removal triggers** (any one):
+
+- Supabase Pro tier disk allocation verified at 8 GB AND `tools/irve-sync` succeeds without `FileFallocate` (E21 forward-practice update verified).
+- Chunked-swap refactor of `run_irve_swap` landed.
+- Migration to a non-free-tier hosted Postgres.
+
+Until then, this loader is the sole writer of `live.stations.tarification`. Operator triggers it manually before each parser orchestrator run. `live.copy_tarification_from_staging()` and the irve-sync swap-path call to it remain in place dormant — pure file-delete cleanup when removal triggers fire.
+
+---
+
+## Hard rule #4 cumulative tally (W5 close)
+
+Hard rule #4 atomicity has now caught **13+ issues across W3+W4+W5**:
+
+**W3 + W4 (8):**
+
+- T06b.1 — 4 first-apply bugs in 0012/0013/0014/0015 (E17, E19, E20, idempotence verification respectively).
+- T06b.3.a — 1 environmental fault (cluster-level read-only flip mid-swap, E21).
+- T07.3 — 2 runner bugs (chunked-commit dedupe error + skip-caching infinite-loop).
+- T08.1 — 1 self-count drift caught pre-commit by COMMENT review (33 vs 34 operators).
+
+**W5 (5+):**
+
+- T13.2 pre-tx FK check caught a missing payment_method slug (catch #9 — 0 writes).
+- T13.2 Postgres `MAX_PARAMETERS_EXCEEDED` tx rolled back (catch #10).
+- T13.2 `parser_outcomes_dedupe_unique` constraint within-run rolled back (catch #11).
+- T13.2 SUCCESS atomic commit (catch #12, success-path validation).
+- E21 instances #2 and #3 disk-full atomic rollback — 2 instances (catch #13).
+
+**The contract continues to be load-bearing infrastructure for this codebase's correctness story.** 13+ catches across 5 weekend sessions, zero data damage incidents.
+
+---
+
+## Discipline observations (W5 additions)
+
+### Observation 6 — surface-vs-substance pattern survives a fourth weekend (T13.0 + T13.2)
+
+T13.0's brief framed migration 0018 as a "trivial column add" (~5 LOC). Reality after pre-flight: a column add + a SQL function (`live.copy_tarification_from_staging`) implementing canonical-row selection (DISTINCT ON id_station_itinerance ORDER BY date_maj DESC NULLS LAST) for the 21.6% station-grain conflict case + an irve-sync amendment to call the function post-swap + idempotency guarantees. Substance was 70 LOC of SQL across 0018 + 60 LOC of Python amendment.
+
+T13.2's brief framed parser_outcomes writing as "one row per parser hit." Reality: schema-level UNIQUE (raw_input_hash, source_id, parser_version) by design (0007 D5) means **input-grain dedupe must happen orchestrator-side BEFORE INSERT** — collapsing 14,111 station-grain hits to 422 unique input-grain rows. Brief didn't surface this; pre-flight mapping the schema constraint to the writer's responsibility did.
+
+**Forward-practice (paired with discipline obs #1, #3):** every brief estimate gets two verifications — (a) read the schema constraints that bind the writer, (b) pre-flight a synthetic shape against those constraints — before locking complexity. The sub-trivial-looking task is the most likely to hide structural surprise.
+
+### Observation 7 — Read-the-current-docs beats trust-the-brief (T15.1 + T15.2)
+
+Brief filename was `middleware.ts`; Next 16 renamed to `proxy.ts` with function name `proxy()` (per `node_modules/next/dist/docs/01-app/03-api-reference/03-file-conventions/proxy.md`). Brief assumed Tailwind utility `grid-cols-24`; Tailwind v4 ships only `grid-cols-1..12` by default. Brief assumed synchronous `params`/`searchParams`; Next 16 made them Promises (15.0.0-RC change documented in `page.md`).
+
+All three caught at T15.1/T15.2 implementation time by reading current installed-version docs before writing code. **Forward-practice:** any time the brief assumes a framework convention, verify against current installed-version docs (`node_modules/<framework>/dist/docs/`, official site, or release notes for major-version bumps). The cost of one doc read is dwarfed by the cost of debugging a build break post-commit.
+
+**Pairs with discipline obs #2** (read-the-code-beats-trust-the-brief) — same pattern at the dependency-version layer rather than the codebase layer. AGENTS.md's "this is NOT the Next.js you know — read the relevant guide first" rule is the explicit codification of this discipline.
+
+---
+
+## Closing meta-note (W5 close — Phase 1 audit blind-spot pattern refresh v3)
+
+Supersedes the W4 closing meta-note in scope; the W4 entry stays as historical record per append-only convention.
+
+Phase-1 A.1 audit method now has **10 documented failure-mode instances across W3 + W4 + W5**:
+
+1. **Within-key duplicates** (E17) — sampling distinct values without measuring per-key cardinality.
+2. **Prefix-distribution gaps** (E18) — postal-code-only geographic scoping without checking national-ID prefix distribution.
+3. **Type-precision round-tripping** (E19) — checking validity against raw text without casting through the destination column's precision.
+4. **Cross-dimension uniqueness** (E20) — assuming external PKs are globally unique without measuring `(id || parent)` cardinality vs `id`-alone cardinality.
+5. **Cardinality at API-normalization grain** (E22) — PDC-grain Phase-1 numbers don't predict post-dedupe station-grain reality at API call sites or alias resolvers (1.39× factor in practice).
+6. **Long-tail composition** (E23) — distribution-by-top-N skews the operator's mental model; the long tail's *internal* composition matters as much as its size.
+7. **Shape vs value-distribution conflation** (#7, T10) — "5 distinct schemas" reported when reality was 1 shape × 5 value tuples.
+8. **Multi-operator-scope assumption** (#8, T11) — assuming an operator-template hallmark maps 1:1 to one operator family; reality was 11 enseignes sharing the CITEOS template.
+9. **Unit-symbol enumeration gap** (#9, T12) — surveying free-text prices by one unit symbol misses parallel families under different symbols (€/kWh missed cts/kWh's 3,265-row family).
+10. **Cross-grain conflict assumption** (#10, T13.0) — copying across grain boundaries without `DISTINCT ON` the target grain when source-grain rows can disagree on column values.
+
+**Pattern (refreshed v3):** distinct-value sampling without per-key cardinality + cross-dimension cardinality + destination-type round-trip + post-transformation grain re-grounding + long-tail composition + shape-vs-value-distribution + multi-operator-scope assumption + unit-symbol enumeration + cross-grain conflict. **Bundle these as the "Phase 1 audit checklist v2"** if M2 introduces a new dataset or M1.5 expands the alias seed.
+

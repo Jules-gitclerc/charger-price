@@ -718,7 +718,10 @@ async function main(): Promise<number> {
             parser_version: po.parser_version,
           }));
           for (const chunk of chunked(poRows)) {
-            await tx`INSERT INTO live.parser_outcomes ${tx(chunk, 'ingestion_run_id', 'source_id', 'raw_input', 'raw_input_hash', 'outcome', 'parsed_value_json', 'parser_version')}`;
+            // T13.2 hygiene (W5 closing bundle): postgres-js Helper overload's
+            // ParameterOrJSON<never> rejects bare `object` (TS non-primitive).
+            // Narrow via cast to JSON-serializable shape; runtime untouched.
+            await tx`INSERT INTO live.parser_outcomes ${tx(chunk as unknown as Record<string, unknown>[], 'ingestion_run_id', 'source_id', 'raw_input', 'raw_input_hash', 'outcome', 'parsed_value_json', 'parser_version')}`;
           }
         }
         // tariff_url updates (P3 hits) — bulk UPDATE via VALUES
